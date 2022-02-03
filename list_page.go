@@ -3,26 +3,32 @@ package main
 import (
 	"context"
 	"net/http"
-	"net/url"
-	"strings"
+	"sort"
+	"strconv"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
+type ListItem struct {
+	URL         string
+	PublishDate time.Time
+}
+
 type ListPage struct {
-	URL         *url.URL
-	PrevPageURL *url.URL
-	NextPageURL *url.URL
-	ArticleURLs []string
+	URL         string
+	PrevPageURL string
+	NextPageURL string
+	Items       []*ListItem
 
 	parsed bool
 }
 
 func NewListPage(
 	ctx context.Context,
-	u *url.URL,
+	listURL string,
 ) (*ListPage, error) {
-	ip := &ListPage{URL: u}
+	ip := &ListPage{URL: listURL}
 
 	err := ip.Parse(ctx)
 	if err != nil {
@@ -37,7 +43,7 @@ func (lp *ListPage) Parse(ctx context.Context) error {
 		return ErrAlreadyParsed
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", lp.URL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", lp.URL, nil)
 	if err != nil {
 		return err
 	}
@@ -53,67 +59,55 @@ func (lp *ListPage) Parse(ctx context.Context) error {
 		return err
 	}
 
-	lp.ArticleURLs = lp.extractArticleURLs(doc)
-
-	lp.NextPageURL, err = lp.extractNextPageURL(doc)
-	if err != nil {
-		return err
-	}
-
-	lp.PrevPageURL, err = lp.extractPrevPageURL(doc)
-	if err != nil {
-		return err
-	}
+	lp.parseListItems(doc)
+	lp.parseNextPageURL(doc)
+	lp.parsePrevPageURL(doc)
 
 	lp.parsed = true
 
 	return nil
 }
 
-func (lp *ListPage) extractArticleURLs(doc *goquery.Document) []string {
-	uniqURLs := map[string]bool{}
+func (lp *ListPage) parseListItems(doc *goquery.Document) {
+	doc.Find("section").Each(func(_ int, sec *goquery.Selection) {
+		href, ok := sec.Find("a[data-link-name=article]").Attr("href")
+		if !ok || href == "" {
+			return
+		}
 
-	doc.Find("section a[data-link-name=article]").Each(
-		func(_ int, s *goquery.Selection) {
-			href, ok := s.Attr("href")
-			if ok && href != "" {
-				uniqURLs[strings.TrimSpace(href)] = true
+		li := &ListItem{URL: href}
+
+		sec.Find("time").EachWithBreak(func(_ int, t *goquery.Selection) bool {
+			timestamp, ok := t.Attr("data-timestamp")
+			if !ok {
+				return true
 			}
-		},
-	)
 
-	urls := []string{}
-	for u := range uniqURLs {
-		urls = append(urls, u)
-	}
+			millisec, err := strconv.ParseInt(timestamp, 10, 64)
+			if err != nil {
+				return true
+			}
+			li.PublishDate = time.Unix(millisec/1000, millisec%1000)
 
-	return urls
+			return false
+		})
+
+		lp.Items = append(lp.Items, li)
+	})
+
+	sort.Slice(lp.Items, func(i, j int) bool {
+		return lp.Items[i].PublishDate.After(lp.Items[j].PublishDate)
+	})
 }
 
-func (lp *ListPage) extractNextPageURL(doc *goquery.Document) (*url.URL, error) {
-	href, ok := doc.Find(".pagination a[rel=next]").Attr("href")
-	if !ok {
-		return nil, nil
+func (lp *ListPage) parseNextPageURL(doc *goquery.Document) {
+	if href, ok := doc.Find(".pagination a[rel=next]").Attr("href"); ok {
+		lp.NextPageURL = href
 	}
-
-	u, err := url.Parse(href)
-	if err != nil {
-		return nil, err
-	}
-
-	return u, nil
 }
 
-func (lp *ListPage) extractPrevPageURL(doc *goquery.Document) (*url.URL, error) {
-	href, ok := doc.Find(".pagination a[rel=prev]").Attr("href")
-	if !ok {
-		return nil, nil
+func (lp *ListPage) parsePrevPageURL(doc *goquery.Document) {
+	if href, ok := doc.Find(".pagination a[rel=prev]").Attr("href"); ok {
+		lp.PrevPageURL = href
 	}
-
-	u, err := url.Parse(href)
-	if err != nil {
-		return nil, err
-	}
-
-	return u, nil
 }
